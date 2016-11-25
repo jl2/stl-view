@@ -6,10 +6,11 @@
   :description "Describe stl-view here"
   :author "Jeremiah LaRocco <jeremiah.larocco@gmail.com>"
   :license "ISC (BSD-like)"
-  :depends-on (#:lispbuilder-sdl
+  :depends-on (#:sdl2
                #:cl-opengl
                #:cl-glu
-               #:stl)
+               #:stl
+               #:trivial-main-thread)
   :serial t
   :components ((:file "package")
                (:file "stl-view")))

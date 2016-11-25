@@ -75,12 +75,16 @@
 
 (defun normalize (vect)
   (declare (type rvector vect))
-  (let ((ilen (/ 1.0 (vlength vect))))
+  (let ((ilen (/ 1.0f0 (vlength vect))))
     (vscale ilen vect)))
 
-(defparameter *fps* 60)
+(defstruct view-controls
+  (scale-factor 1.0)
+  (x-rotation 0.0)
+  (y-rotation 0.0)
+  (z-rotation 0.0))
 
-(defun render-stl (triangles scale-factor x-rotation y-rotation z-rotation)
+(defun render-stl (triangles view-controls)
   "Used OpenGL to display the grid."
   (gl:matrix-mode :modelview)
   (gl:load-identity)
@@ -90,15 +94,15 @@
   ;; Actual drawing goes here.  In this case, just a line.
   (gl:push-matrix)
 
-  (gl:scale scale-factor scale-factor scale-factor)
-  (gl:rotate x-rotation 1 0 0)
-  (gl:rotate y-rotation 0 1 0)
-  (gl:rotate z-rotation 0 0 1)
+  (with-slots (scale-factor x-rotation y-rotation z-rotation) view-controls
+    (gl:scale scale-factor scale-factor scale-factor)
+    (gl:rotate x-rotation 1 0 0)
+    (gl:rotate y-rotation 0 1 0)
+    (gl:rotate z-rotation 0 0 1))
+
   (gl:material :front :diffuse #(0.0 0.5 0.0 1.0))
   
-  ;; TODO: Use "modern" OpenGL
   (gl:with-primitives :triangles
-;;    (gl:color 0 1 0)
     (loop
        for tri across triangles
        do
@@ -117,94 +121,89 @@
                       (stl:point-y pt3)
                       (stl:point-z pt3)))))
   
-  (gl:pop-matrix))
+  (gl:pop-matrix)
+  (gl:flush))
 
-(defun show-stl (triangles
-                 &key
-                   (width 800)
-                   (height 800)
-                   (fps 30)
-                   (delay 20))
-  (let ((scale-factor 1.0f0)
-        (x-rotation 0.0f0)
-        (y-rotation 0.0f0)
-        (z-rotation 0.0f0)
-        (prev-tick 0) ;; prev-tick is the previous value of sdl-system-ticks when the board was updated
-        (paused nil)) ;; paused is t when paused, nil when not
-    (sdl:with-init
-        ()
-      ;; Setup the window and view
-      (sdl:window width height
-                  :opengl t
-                  :opengl-attributes '((:sdl-gl-depth-size   24)
-                                       (:sdl-gl-doublebuffer 1)))
-      (setf (sdl:frame-rate) fps)
-      
-      (gl:viewport 0 0 width height)
-      (gl:matrix-mode :projection)
-      (gl:load-identity)
-      (glu:perspective 50 (/ height width) 1.0 5000.0)
-      (glu:look-at 12 12 12
-                   0 0 0
-                   0 1 0)
 
-      (gl:clear-color 0 0 0 0)
-      (gl:shade-model :smooth)
-      (gl:cull-face :back)
-      (gl:polygon-mode :front :fill)
-      (gl:draw-buffer :back)
+;; =============================================================================
+;; User input
 
-;;       (gl:material :front :ambient-and-diffuse #(0.2 1.0 0.2 0.2))
-      (gl:light :light0 :position #(0.0f0 8.0f0 0.0f0 1.0f0))
-      (gl:light :light0 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
-      (gl:light :light1 :position #(8.0f0 8.0f0 8.0f0 1.0f0))
-      (gl:light :light1 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
-      (gl:light :light2 :position #(0.0f0 0.0f0 0.0f0 1.0f0))
-      (gl:light :light2 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
-      (gl:enable :cull-face :depth-test
-                 :lighting :light0 :light1 :light2
-                 )
+(defun handle-key-down (keysym view)
+  "Handle key presses."
+  (declare (ignorable view))
+  (case (sdl2:scancode keysym)
+    (:scancode-escape (sdl2:push-event :quit))
+    (:scancode-q (sdl2:push-event :quit))))
 
-      (gl:clear :color-buffer :depth-buffer)
-      
-      ;; Draw the initial board
-      (render-stl triangles scale-factor x-rotation y-rotation z-rotation)
-      (sdl:update-display)
+(defun handle-window-size (width height)
+  "Adjusting the viewport and projection matrix for when the window size changes."
+  (gl:viewport 0 0 width height)
+  (gl:matrix-mode :projection)
+  (gl:load-identity)
+  (glu:perspective 50 (/ height width) 1.0 5000.0)
+  (glu:look-at 8 8 8 
+               0 0 0
+               0 1 0)
+  (gl:clear :color-buffer :depth-buffer))
 
-      ;; Handle events
-      (sdl:with-events ()
-        (:quit-event () t)
-        (:mouse-button-up-event
-         (:button button :state state :x x :y y)
-         (when (= button 4)
-           (incf scale-factor 0.5))
-         (when (= button 5)
-           (setf scale-factor (max 1.0 (- scale-factor 0.5)))))
-        
-        (:key-down-event
-         ()
-         ;; quit
-         (when (or (sdl:key-down-p :sdl-key-q) (sdl:key-down-p :sdl-key-escape))
-           (sdl:push-quit-event))
 
-         ;; Pause/unpause
-         (when (sdl:key-down-p :sdl-key-p)
-           (if paused
-               (setf paused nil)
-               (setf paused t))))
+;; =============================================================================
+;; SDL render and input loop
 
-        (:video-expose-event () (sdl:update-display))
+(defun real-show-stl (stl-tris)
+  "Main entry point for the program."
+  (let ((view (make-view-controls)))
+    (sdl2:with-init (:everything)
+      (sdl2:with-window (window :title "filevis"
+                                :flags '(:shown :resizable :opengl))
+        (sdl2:with-gl-context (gl-context window)
 
-        (:idle
-         ;; Check if it's time to update
-         (when (> (- (sdl:system-ticks) prev-tick) delay)
-           (setf prev-tick (sdl:system-ticks))
+          (sdl2:gl-make-current window gl-context)
 
-           ;; Only update the board while not paused
-           (when (not paused)
-             (incf y-rotation (/ (* 2 pi) 2)))
+          (multiple-value-call #'handle-window-size (sdl2:get-window-size window))
 
-             ;; Clear the screen and redraw
-           (gl:clear :color-buffer :depth-buffer)
-           (render-stl triangles scale-factor x-rotation y-rotation z-rotation)
-           (sdl:update-display)))))))
+          (gl:clear-color 0 0 0 0)
+          (gl:shade-model :smooth)
+          (gl:cull-face :back)
+          (gl:polygon-mode :front :fill)
+          (gl:draw-buffer :back)
+
+          (gl:light :light0 :position #(0.0f0 8.0f0 0.0f0 1.0f0))
+          (gl:light :light0 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
+          (gl:light :light1 :position #(8.0f0 8.0f0 8.0f0 1.0f0))
+          (gl:light :light1 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
+          (gl:light :light2 :position #(0.0f0 0.0f0 0.0f0 1.0f0))
+          (gl:light :light2 :diffuse #(1.0f0 1.0f0 1.0f0 1.0f0))
+          (gl:enable :cull-face :depth-test
+                     :lighting :light0 :light1 :light2)
+
+
+          (sdl2:with-event-loop (:method :poll :timeout 1/60)
+            
+            (:windowevent
+             (:event event :data1 w :data2 h)
+             (when (= event sdl2-ffi:+sdl-windowevent-resized+)
+               (handle-window-size w h)))
+            
+            (:idle
+             ()
+             (incf (view-controls-y-rotation view) 1.0)
+             (gl:clear :color-buffer :depth-buffer)
+             (render-stl stl-tris view)
+             (sleep (/ 1.0 *fps*))
+             (sdl2:gl-swap-window window))
+            
+            (:quit () t)))))))
+
+(defun show-stl (stl-tris)
+  "View STL triangle data."
+
+  ;; This is silly, but seems to be the only way to make an 
+  ;; SDL window open and respond to user input from slime
+
+  ;; Spawn a new SDL2 main thread from the main thread.
+  (trivial-main-thread:call-in-main-thread 
+   (lambda () 
+     (sdl2:make-this-thread-main 
+      (lambda () 
+        (real-show-stl stl-tris))))))
